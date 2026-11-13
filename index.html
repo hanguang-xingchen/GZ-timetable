@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>时间墙</title>
+<style>
+:root {
+  --cell: 13px;
+  --gap: 3px;
+  --cols: 52;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #656d76;
+  --card: #f6f8fa;
+  --border: #d0d7de;
+  --empty-border: #d8dee4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --card: #161b22;
+    --border: #30363d;
+    --empty-border: #2d333b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+main { max-width: 1000px; margin: 0 auto; padding: 32px 20px 64px; }
+
+/* 未构建的模板只展示给路过者的提示；构建后 build.py 把 data-state 改成 built */
+#app { display: none; }
+#empty { display: block; }
+body[data-state="built"] #app { display: block; }
+body[data-state="built"] #empty { display: none; }
+
+.head { margin-bottom: 20px; }
+.head h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+.head .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.panel-title {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+}
+
+/* ---------- 统计 ---------- */
+.headline { margin: 0 0 14px; font-size: 15px; }
+.headline b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.bars { display: grid; gap: 7px; }
+.bar-row {
+  display: grid;
+  grid-template-columns: 6.5em 1fr 5.5em;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+.bar-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-track { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.bar-fill { display: block; height: 100%; border-radius: 4px; }
+.bar-num { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- 墙 ---------- */
+.wall-scroll { overflow-x: auto; padding-bottom: 88px; }
+.wall { display: inline-block; min-width: 100%; }
+.wall-body {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 6px 8px;
+  align-items: start;
+}
+.corner { width: 1.6em; }
+.months {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), var(--cell));
+  gap: var(--gap);
+  height: 15px;
+}
+.months span {
+  grid-row: 1;
+  justify-self: start;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.weekdays {
+  display: grid;
+  grid-template-rows: repeat(7, var(--cell));
+  gap: var(--gap);
+  width: 1.6em;
+}
+.weekdays div {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: var(--cell);
+  text-align: right;
+}
+.grid {
+  display: grid;
+  grid-template-rows: repeat(7, var(--cell));
+  gap: var(--gap);
+}
+.row {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), var(--cell));
+  gap: var(--gap);
+}
+.cell {
+  position: relative;
+  width: var(--cell);
+  height: var(--cell);
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cell .glyph { font-size: 8px; line-height: 1; color: rgba(255,255,255,.9); }
+.cell--empty { background: transparent; box-shadow: inset 0 0 0 1px var(--empty-border); }
+.cell--future { opacity: .32; }
+
+/* 纯 CSS 悬窗：显示在格子下方，靠 .wall-scroll 的 padding-bottom 留出空间 */
+.tip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: none;
+  z-index: 6;
+  pointer-events: none;
+  width: max-content;
+  max-width: 220px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 4px 14px rgba(0,0,0,.28);
+}
+.tip > span { display: block; }
+.tip-type { display: flex; align-items: center; gap: 5px; }
+.tip-type i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tip-note { opacity: .85; }
+.cell:hover .tip { display: block; }
+.row .cell:nth-child(-n+2) .tip { left: 0; transform: none; }
+.row .cell:nth-last-child(-n+2) .tip { left: auto; right: 0; transform: none; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.swatch { width: var(--cell); height: var(--cell); border-radius: 2px; display: inline-block; }
+.swatch--empty { background: transparent; box-shadow: inset 0 0 0 1px var(--empty-border); }
+.hint { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+
+/* ---------- 记录列表 ---------- */
+.notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.notes li { display: grid; grid-template-columns: 8.5em 7.5em 1fr; gap: 10px; align-items: baseline; }
+.n-date { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.n-type { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.n-type i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.n-note { min-width: 0; overflow-wrap: anywhere; }
+.n-none { color: var(--muted); }
+
+.foot { color: var(--muted); font-size: 12px; }
+
+/* ---------- 空状态（给路过者） ---------- */
+.empty { max-width: 620px; margin: 0 auto; padding: 64px 20px; }
+.empty h1 { font-size: 20px; margin: 0 0 10px; }
+.empty p { color: var(--muted); margin: 8px 0; max-width: 46em; }
+.empty .lead { color: var(--fg); }
+.empty .empty-sub { font-size: 13px; margin-top: 18px; }
+
+@media (max-width: 900px) {
+  :root { --cell: 10px; --gap: 2px; }
+  main { padding: 20px 14px 48px; }
+  .bar-row { grid-template-columns: 5.5em 1fr 5em; font-size: 12px; }
+  .notes li { grid-template-columns: 7.5em 1fr; }
+  .n-note { grid-column: 1 / -1; }
+}
+</style>
+</head>
+<body data-state="unbuilt">
+
+<main id="app">
+  <header class="head">
+    <h1><!--build:heading-->时间墙<!--/build:heading--></h1>
+    <p class="sub"><!--build:subtitle--><!--/build:subtitle--></p>
+  </header>
+
+  <section class="panel">
+    <h2 class="panel-title">统计</h2>
+    <p class="headline"><!--build:headline--><!--/build:headline--></p>
+    <div class="bars"><!--build:stats--><!--/build:stats--></div>
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">最近 52 周</h2>
+    <div class="wall-scroll">
+      <div class="wall" id="wall">
+        <div class="wall-body">
+          <div class="corner"></div>
+          <div class="months"><!--build:months--><!--/build:months--></div>
+          <div class="weekdays"><!--build:weekdays--><!--/build:weekdays--></div>
+          <div class="grid" id="grid" role="grid" aria-label="每日状态墙"><!--build:cells--><!--/build:cells--></div>
+        </div>
+      </div>
+    </div>
+    <div class="legend"><!--build:legend--><!--/build:legend--></div>
+    <p class="hint">鼠标悬停格子查看备注 · 完整记录见下方列表</p>
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">记录</h2>
+    <ul class="notes"><!--build:notes--><!--/build:notes--></ul>
+  </section>
+
+  <footer class="foot"><!--build:footer--><!--/build:footer--></footer>
+</main>
+
+<div class="empty" id="empty">
+  <h1>这里还是一面空墙</h1>
+  <p class="lead">这是一面私人时间墙，用颜色记下每一天：灰蓝是正常上学，琥珀是部分占用，红是假期被占用，绿是休假，紫是特殊的日子。</p>
+  <p>你打开的这一份还没有填上颜色，大概是误入了尚未生成的版本。稍后再来看看，墙会慢慢长满；若只是走错了门，轻轻关掉这一页就好。</p>
+  <p class="empty-sub">祝你今天是被绿色填满的一天。</p>
+</div>
+
+</body>
+</html>

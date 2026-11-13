@@ -1,0 +1,60 @@
+name: 部署时间墙
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - events.jsonl
+      - config.json
+      - index.html
+      - build.py
+      - .github/workflows/deploy.yml
+  # 52 周窗口在构建时算死，只在跨周时变化；每周一定时重建，兜底长期不 push 的情况
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+# deploy-pages 需要 pages:write 换发部署凭证；id-token:write 用于 OIDC 认证
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 连续推送时排队而不是取消，避免两次部署互相踩
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只用标准库，runner 自带 python3，无需 setup-python / pip install
+      - name: 跑回归测试
+        run: python3 -m unittest test_build -v
+
+      # 数据有任何问题就在这里失败，后面的部署步骤不会执行，
+      # 线上页面保持上一个可用版本
+      - name: 校验数据
+        run: python3 build.py --check
+
+      - name: 构建
+        run: python3 build.py
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      # 只上传 dist/，events.jsonl、build.py 等源文件不会被发布到公网
+      - name: 上传产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
