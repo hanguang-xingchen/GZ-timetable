@@ -19,15 +19,15 @@ TEMPLATE = """<!doctype html>
 </head>
 <body data-state="unbuilt">
 <h1><!--build:heading--><!--/build:heading--></h1>
-<p><!--build:subtitle--><!--/build:subtitle--></p>
-<p><!--build:headline--><!--/build:headline--></p>
+<p><!--build:date-range--><!--/build:date-range--> · 共 <!--build:n-weeks--><!--/build:n-weeks--> 周 · 周<!--build:week-start-name--><!--/build:week-start-name-->起始</p>
+<p>已记录 <b><!--build:n-recorded--><!--/build:n-recorded--></b> / <!--build:n-total--><!--/build:n-total--> 天<!--build:top-clause--><!--/build:top-clause-->。<!--build:countdown--><!--/build:countdown--></p>
 <div><!--build:stats--><!--/build:stats--></div>
 <div><!--build:months--><!--/build:months--></div>
 <div><!--build:weekdays--><!--/build:weekdays--></div>
 <div><!--build:cells--><!--/build:cells--></div>
-<div><!--build:legend--><!--/build:legend--></div>
+<div><span class="legend-item"><span class="swatch swatch--empty"></span>未记录</span><!--build:legend-types--><!--/build:legend-types--></div>
 <ul><!--build:notes--><!--/build:notes--></ul>
-<p><!--build:footer--><!--/build:footer--></p>
+<p>共 <!--build:n-records--><!--/build:n-records--> 条记录 · 数据生成于 <!--build:build-time--><!--/build:build-time--> · 源自 events.jsonl</p>
 </body></html>
 """
 
@@ -377,21 +377,24 @@ class TestRender(TempCase):
         matrix = build.window_dates(
             config["windowStart"], config["windowEnd"], config["weekStart"]
         )
-        headline, stats = build.render_stats(
+        stats_parts, stats = build.render_stats(
             matrix, records, config["types"], TODAY, config["countdownLabel"]
         )
         values = {
             "heading": build.esc(config["title"]),
-            "subtitle": "副标题",
-            "headline": headline,
+            "date-range": "日期区间",
+            "n-weeks": "周数",
+            "week-start-name": "一",
+            **stats_parts,
             "stats": stats,
             "months": build.render_months(matrix),
             "weekdays": build.render_weekdays(config["weekStart"]),
             "cells": build.render_cells(matrix, records, type_by_id, TODAY, config["showGlyph"]),
-            "legend": build.render_legend(config["types"]),
+            "legend-types": build.render_legend(config["types"]),
             "notes": build.render_notes(records, type_by_id),
+            "n-records": "记录数",
+            "build-time": "生成时间",
             "vars": build.render_vars(len(matrix[0])),
-            "footer": "页脚",
         }
         return build.fill_regions(TEMPLATE, values, Path("index.html"))
 
@@ -552,7 +555,12 @@ class TestMain(TempCase):
     def test_subtitle_spells_out_the_fixed_window(self) -> None:
         _, out = self.run_build()
         html_text = out.read_text(encoding="utf-8")
-        self.assertIn(f"{BOUNDS[0]} → {BOUNDS[1]} · 共 {WEEKS} 周", html_text)
+        # 骨架在模板里，值被区域标记夹着，所以按标记分段核对
+        self.assertIn(
+            f"<!--build:date-range-->{BOUNDS[0]} → {BOUNDS[1]}<!--/build:date-range-->",
+            html_text,
+        )
+        self.assertIn(f"<!--build:n-weeks-->{WEEKS}<!--/build:n-weeks--> 周", html_text)
         self.assertNotIn("最近 52 周", html_text)
 
     def test_headline_carries_the_countdown(self) -> None:

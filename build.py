@@ -39,8 +39,11 @@ WEEKDAY_LONG = ["周日", "周一", "周二", "周三", "周四", "周五", "周
 WEEKDAY_CHAR = ["日", "一", "二", "三", "四", "五", "六"]
 
 REGIONS = [
-    "heading", "subtitle", "headline", "stats",
-    "months", "weekdays", "cells", "legend", "notes", "footer", "vars",
+    "heading",
+    "date-range", "n-weeks", "week-start-name",
+    "n-recorded", "n-total", "top-clause", "countdown", "stats",
+    "months", "weekdays", "cells", "legend-types", "notes",
+    "n-records", "build-time", "vars",
 ]
 
 # <title> 是 escapable raw text，里面的注释标记会被当成正文显示在标签栏，
@@ -438,13 +441,12 @@ def render_weekdays(week_start: int) -> str:
 
 
 def render_legend(types: list[dict]) -> str:
-    items = ['<span class="legend-item"><span class="swatch swatch--empty"></span>未记录</span>']
-    for t in types:
-        items.append(
-            f'<span class="legend-item"><span class="swatch" '
-            f'style="background:{t["color"]}"></span>{esc(t["name"])}</span>'
-        )
-    return "".join(items)
+    # 「未记录」那一项是 index.html 模板里的静态文案，不在这里生成
+    return "".join(
+        f'<span class="legend-item"><span class="swatch" '
+        f'style="background:{t["color"]}"></span>{esc(t["name"])}</span>'
+        for t in types
+    )
 
 
 def render_vars(weeks: int) -> str:
@@ -462,7 +464,7 @@ def render_stats(
     types: list[dict],
     today: date,
     countdown_label: str | None,
-) -> tuple[str, str]:
+) -> tuple[dict[str, str], str]:
     drawn = drawn_days(matrix)
     counts = {t["id"]: 0 for t in types}
     recorded = 0
@@ -474,20 +476,26 @@ def render_stats(
         if record and record["type"] in counts:
             counts[record["type"]] += 1
             recorded += 1
-    weeks = len(matrix[0])
     ranked = sorted(types, key=lambda t: counts[t["id"]], reverse=True)
     top = ranked[0] if ranked else None
     max_count = counts[top["id"]] if top else 0
 
-    if recorded == 0:
-        headline = f"这 {weeks} 周还没有任何记录。"
-    else:
-        headline = (
-            f"已记录 <b>{recorded}</b> / {len(drawn)} 天，其中 "
-            f"<b>{esc(top['name'])} {counts[top['id']]} 天</b> 最多。"
-        )
-    if countdown_label and remaining > 0:
-        headline += f"距离{esc(countdown_label)}还有 <b>{remaining}</b> 天。"
+    # 统计整句的骨架住在 index.html 模板里，这里只产出要填进去的值；
+    # 没有记录或没有倒计时时，对应的从句填空字符串，句子自然缩短
+    parts = {
+        "n-recorded": str(recorded),
+        "n-total": str(len(drawn)),
+        "top-clause": (
+            f"，其中 <b>{esc(top['name'])} {counts[top['id']]} 天</b> 最多"
+            if recorded
+            else ""
+        ),
+        "countdown": (
+            f"距离{esc(countdown_label)}还有 <b>{remaining}</b> 天。"
+            if countdown_label and remaining > 0
+            else ""
+        ),
+    }
 
     bars = []
     for t in ranked:
@@ -500,7 +508,7 @@ def render_stats(
             f'style="background:{t["color"]};width:{pct:.1f}%"></span></div>'
             f'<span class="bar-num">{n} 天 · {share}%</span></div>'
         )
-    return headline, "".join(bars)
+    return parts, "".join(bars)
 
 
 def render_notes(days: dict[str, dict], type_by_id: dict[str, dict]) -> str:
@@ -626,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     type_by_id = {t["id"]: t for t in config["types"]}
     today = date.today()
     weeks = len(matrix[0])
-    headline, stats = render_stats(
+    stats_parts, stats = render_stats(
         matrix, days, config["types"], today, config["countdownLabel"]
     )
     start = matrix[0][0]
@@ -634,21 +642,19 @@ def main(argv: list[str] | None = None) -> int:
 
     values = {
         "heading": esc(config["title"]),
-        "subtitle": esc(
-            f"{start.isoformat()} → {end.isoformat()} · 共 {weeks} 周 · "
-            f"周{'一' if config['weekStart'] == 1 else '日'}起始"
-        ),
-        "headline": headline,
+        "date-range": esc(f"{start.isoformat()} → {end.isoformat()}"),
+        "n-weeks": str(weeks),
+        "week-start-name": "一" if config["weekStart"] == 1 else "日",
+        **stats_parts,
         "stats": stats,
         "months": render_months(matrix),
         "weekdays": render_weekdays(config["weekStart"]),
         "cells": render_cells(matrix, days, type_by_id, today, config["showGlyph"]),
-        "legend": render_legend(config["types"]),
+        "legend-types": render_legend(config["types"]),
         "notes": render_notes(days, type_by_id),
+        "n-records": str(len(days)),
+        "build-time": esc(build_timestamp()),
         "vars": render_vars(weeks),
-        "footer": esc(
-            f"共 {len(days)} 条记录 · 数据生成于 {build_timestamp()} · 源自 events.jsonl"
-        ),
     }
 
     try:

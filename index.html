@@ -210,16 +210,40 @@ body[data-state="built"] #empty { display: none; }
 <!--build:vars--><style>:root{--cols:52}</style><!--/build:vars-->
 </head>
 <body data-state="unbuilt">
+<!--
+  构建契约：这面墙「说什么话」住在本文件，build.py 只往区域标记里填值。
+  三类内容的分工——
+    index.html ：所有 CSS、结构/ARIA，以及下面这些整句文案的骨架；
+    config.json：纯数据与选择（title、types、窗口日期、weekStart、showGlyph、countdownLabel）；
+    build.py   ：纯计算与循环（月份、星期字、悬停备注、记录列表、统计条），
+                 以及注入的 vars 区域（--cols 不能进主 style 块，那是 raw text）。
+  区域标记形如「build:名字 … /build:名字」（尖括号省略，免得提前结束本注释），
+  标记中间是未构建时的占位字。一览：
+    heading         页面大标题              ← config.title
+    date-range      窗口起止「… → …」        ← 窗口日期
+    n-weeks         周数                    ← 窗口列数
+    week-start-name 「一」或「日」            ← config.weekStart
+    n-recorded      已记录天数              ← events 统计
+    n-total         画出来的总天数           ← 窗口
+    top-clause      「，其中 … 最多」或空     ← events 统计
+    countdown       「距离…还有 N 天。」或空   ← config.countdownLabel
+    stats / months / weekdays / cells / legend-types / notes
+                    循环生成的结构           ← build.py
+    n-records       记录条数                ← events
+    build-time      生成时间                ← build.py
+    vars            style:root{--cols:N}    ← build.py
+  改文案：直接改本文件的字；改数据：改 config.json；不要在 build.py 里写人话。
+-->
 
 <main id="app">
   <header class="head">
     <h1><!--build:heading-->时间墙<!--/build:heading--></h1>
-    <p class="sub"><!--build:subtitle--><!--/build:subtitle--></p>
+    <p class="sub"><!--build:date-range-->2026-11-02 → 2027-06-08<!--/build:date-range--> · 共 <!--build:n-weeks-->32<!--/build:n-weeks--> 周 · 周<!--build:week-start-name-->一<!--/build:week-start-name-->起始</p>
   </header>
 
   <section class="panel">
     <h2 class="panel-title">统计</h2>
-    <p class="headline"><!--build:headline--><!--/build:headline--></p>
+    <p class="headline">已记录 <b><!--build:n-recorded-->0<!--/build:n-recorded--></b> / <!--build:n-total-->0<!--/build:n-total--> 天<!--build:top-clause--><!--/build:top-clause-->。<!--build:countdown--><!--/build:countdown--></p>
     <div class="bars"><!--build:stats--><!--/build:stats--></div>
   </section>
 
@@ -235,7 +259,7 @@ body[data-state="built"] #empty { display: none; }
         </div>
       </div>
     </div>
-    <div class="legend"><!--build:legend--><!--/build:legend--></div>
+    <div class="legend"><span class="legend-item"><span class="swatch swatch--empty"></span>未记录</span><!--build:legend-types--><!--/build:legend-types--></div>
     <p class="hint">鼠标悬停格子查看备注 · 完整记录见下方列表</p>
   </section>
 
@@ -244,7 +268,7 @@ body[data-state="built"] #empty { display: none; }
     <ul class="notes"><!--build:notes--><!--/build:notes--></ul>
   </section>
 
-  <footer class="foot"><!--build:footer--><!--/build:footer--></footer>
+  <footer class="foot">共 <!--build:n-records-->0<!--/build:n-records--> 条记录 · 数据生成于 <!--build:build-time--><!--/build:build-time--> · 源自 events.jsonl</footer>
 </main>
 
 <div class="empty" id="empty">
