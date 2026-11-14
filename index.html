@@ -6,7 +6,7 @@
 <title>时间墙</title>
 <style>
 :root {
-  --cell: 13px;
+  --cell: 18px;
   --gap: 3px;
   --cols: 52;
   --bg: #ffffff;
@@ -132,7 +132,7 @@ body[data-state="built"] #empty { display: none; }
   align-items: center;
   justify-content: center;
 }
-.cell .glyph { font-size: 8px; line-height: 1; color: rgba(255,255,255,.9); }
+.cell .glyph { font-size: 10px; line-height: 1; color: rgba(255,255,255,.9); }
 .cell--empty { background: transparent; box-shadow: inset 0 0 0 1px var(--empty-border); }
 .cell--future { opacity: .32; }
 
@@ -175,7 +175,8 @@ body[data-state="built"] #empty { display: none; }
   color: var(--muted);
 }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.swatch { width: var(--cell); height: var(--cell); border-radius: 2px; display: inline-block; }
+/* 图例色块不跟 --cell 走：格子放大到 18px 后，跟着放大会压过旁边 12px 的文字 */
+.swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
 .swatch--empty { background: transparent; box-shadow: inset 0 0 0 1px var(--empty-border); }
 .hint { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
 
@@ -205,6 +206,8 @@ body[data-state="built"] #empty { display: none; }
   .n-note { grid-column: 1 / -1; }
 }
 </style>
+<!-- 列数由构建按 config.json 的窗口算出；标记必须留在 <style> 外面（raw text 不认 HTML 注释） -->
+<!--build:vars--><style>:root{--cols:52}</style><!--/build:vars-->
 </head>
 <body data-state="unbuilt">
 
@@ -221,7 +224,7 @@ body[data-state="built"] #empty { display: none; }
   </section>
 
   <section class="panel">
-    <h2 class="panel-title">最近 52 周</h2>
+    <h2 class="panel-title">这一年</h2>
     <div class="wall-scroll">
       <div class="wall" id="wall">
         <div class="wall-body">

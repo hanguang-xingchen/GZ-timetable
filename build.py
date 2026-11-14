@@ -22,11 +22,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-WEEKS = 52
 DAYS_PER_WEEK = 7
-TOTAL_DAYS = WEEKS * DAYS_PER_WEEK
 
-CONFIG_KEYS = {"title", "weekStart", "showGlyph", "types"}
+CONFIG_KEYS = {"title", "weekStart", "showGlyph", "types", "windowStart", "windowEnd"}
 TYPE_KEYS = {"id", "name", "color", "glyph"}
 RECORD_KEYS = {"date", "type", "note"}
 
@@ -39,7 +37,7 @@ WEEKDAY_CHAR = ["日", "一", "二", "三", "四", "五", "六"]
 
 REGIONS = [
     "heading", "subtitle", "headline", "stats",
-    "months", "weekdays", "cells", "legend", "notes", "footer",
+    "months", "weekdays", "cells", "legend", "notes", "footer", "vars",
 ]
 
 # <title> 是 escapable raw text，里面的注释标记会被当成正文显示在标签栏，
@@ -74,6 +72,23 @@ def _read_json(path: Path) -> object:
         ) from None
 
 
+def parse_iso_date(raw: object) -> date | None:
+    """把 YYYY-MM-DD 字符串解析成 date；格式不对或日期不存在时返回 None。"""
+    if not isinstance(raw, str) or not DATE_RE.match(raw):
+        return None
+    year, month, day = (int(part) for part in DATE_RE.match(raw).groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def week_offset(day: date, week_start: int) -> int:
+    """day 距离其所在周第一天的天数。week_start: 0=周日起始，1=周一起始。"""
+    dow_sun = (day.weekday() + 1) % DAYS_PER_WEEK
+    return (dow_sun - week_start) % DAYS_PER_WEEK
+
+
 def load_config(path: Path) -> dict:
     """校验并规范化 config.json。"""
     raw = _read_json(path)
@@ -101,6 +116,29 @@ def load_config(path: Path) -> dict:
     show_glyph = raw.get("showGlyph", False)
     if not isinstance(show_glyph, bool):
         errors.append(f"{path}: showGlyph 必须是布尔值，当前为 {show_glyph!r}")
+
+    # 窗口两端各向外取整到完整周，所以填周内任意一天都行
+    # （比如直接填高考结束的 2027-06-09，会自动扩成 06-07 ~ 06-13 那一周）
+    window_start = parse_iso_date(raw.get("windowStart"))
+    window_end = parse_iso_date(raw.get("windowEnd"))
+    for key, value, parsed in (
+        ("windowStart", raw.get("windowStart"), window_start),
+        ("windowEnd", raw.get("windowEnd"), window_end),
+    ):
+        if parsed is None:
+            errors.append(
+                f"{path}: {key} 必须是 YYYY-MM-DD 形式的真实日期，当前为 {value!r}"
+            )
+    if window_start is not None and window_end is not None:
+        if not isinstance(week_start, bool) and week_start in (0, 1):
+            window_start -= timedelta(days=week_offset(window_start, week_start))
+            window_end += timedelta(
+                days=DAYS_PER_WEEK - 1 - week_offset(window_end, week_start)
+            )
+        if window_end < window_start:
+            errors.append(
+                f"{path}: windowEnd（{window_end}）不能早于 windowStart（{window_start}）"
+            )
 
     raw_types = raw.get("types")
     if not isinstance(raw_types, list) or not raw_types:
@@ -157,6 +195,8 @@ def load_config(path: Path) -> dict:
         "title": title,
         "weekStart": week_start,
         "showGlyph": show_glyph,
+        "windowStart": window_start,
+        "windowEnd": window_end,
         "types": types,
     }
 
@@ -165,11 +205,13 @@ def load_events(
     path: Path,
     valid_ids: set[str],
     allow_duplicate: str | None,
+    window: tuple[date, date] | None = None,
 ) -> tuple[dict[str, dict], list[str]]:
     """逐行校验 events.jsonl，返回 (按日期排序的 days, warnings)。
 
     任何一行不合法都会记入错误并在最后一起抛出——绝不静默跳过，
-    否则墙上少一格你永远不会发现。
+    否则墙上少一格你永远不会发现。window 给出时，窗口外的日期同样算错：
+    它进不了格子，却照样出现在备注列表和页脚计数里，三处数字会互相打架。
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -209,9 +251,16 @@ def load_events(
             continue
         year, month, day = (int(part) for part in DATE_RE.match(raw_date).groups())
         try:
-            date(year, month, day)
+            parsed_date = date(year, month, day)
         except ValueError as exc:
             errors.append(f"{where}: date {raw_date!r} 不是有效日期（{exc}）")
+            continue
+        if window is not None and not window[0] <= parsed_date <= window[1]:
+            errors.append(
+                f"{where}: date {raw_date} 不在窗口 "
+                f"{window[0].isoformat()} ~ {window[1].isoformat()} 内，墙上画不出这一格"
+                "（要收录它就改 config.json 的 windowStart / windowEnd）"
+            )
             continue
 
         type_id = record.get("type")
@@ -269,16 +318,17 @@ def build_timestamp() -> str:
 # ---------------------------------------------------------------- 渲染
 
 
-def window_dates(today: date, week_start: int) -> list[list[date]]:
-    """返回 7 行 × 52 列的日期矩阵（按行输出 DOM）。
+def window_dates(start: date, end: date, week_start: int) -> list[list[date]]:
+    """返回 7 行 × N 列的日期矩阵（按行输出 DOM），N 由起止日期决定。
 
-    窗口终点固定在包含 today 的那一周，起点往前推 51 周。
+    两端各向外取整到完整周，所以传周内任意一天都可以；load_config 已经取整过，
+    这里再算一次是幂等的。
     """
-    dow_sun = (today.weekday() + 1) % DAYS_PER_WEEK
-    offset = (dow_sun - week_start) % DAYS_PER_WEEK
-    start = today - timedelta(days=offset + DAYS_PER_WEEK * (WEEKS - 1))
+    first = start - timedelta(days=week_offset(start, week_start))
+    last_week = end - timedelta(days=week_offset(end, week_start))
+    weeks = (last_week - first).days // DAYS_PER_WEEK + 1
     return [
-        [start + timedelta(days=col * DAYS_PER_WEEK + row) for col in range(WEEKS)]
+        [first + timedelta(days=col * DAYS_PER_WEEK + row) for col in range(weeks)]
         for row in range(DAYS_PER_WEEK)
     ]
 
@@ -346,7 +396,7 @@ def render_cells(
 def render_months(matrix: list[list[date]]) -> str:
     labels = []
     last_col = -99
-    for col in range(WEEKS):
+    for col in range(len(matrix[0])):
         for row in range(DAYS_PER_WEEK):
             d = matrix[row][col]
             if d.day == 1:
@@ -375,26 +425,40 @@ def render_legend(types: list[dict]) -> str:
     return "".join(items)
 
 
+def render_vars(weeks: int) -> str:
+    """列数写成一个独立的 <style> 元素，靠源码顺序覆盖主样式块里的 --cols。
+
+    不能直接把区域标记塞进主 <style>：那是 raw text，<!--...--> 不会被当注释，
+    会变成非法 CSS（和 <title> 同一个坑）。
+    """
+    return f"<style>:root{{--cols:{weeks}}}</style>"
+
+
 def render_stats(
-    matrix: list[list[date]], days: dict[str, dict], types: list[dict]
+    matrix: list[list[date]], days: dict[str, dict], types: list[dict], today: date
 ) -> tuple[str, str]:
     counts = {t["id"]: 0 for t in types}
     recorded = 0
+    remaining = 0
     for row in matrix:
         for d in row:
+            if d > today:
+                remaining += 1
             record = days.get(d.isoformat())
             if record and record["type"] in counts:
                 counts[record["type"]] += 1
                 recorded += 1
+    weeks = len(matrix[0])
     ranked = sorted(types, key=lambda t: counts[t["id"]], reverse=True)
     top = ranked[0] if ranked else None
     max_count = counts[top["id"]] if top else 0
 
     if recorded == 0:
-        headline = f"这 {WEEKS} 周还没有任何记录。"
+        headline = f"这 {weeks} 周还没有任何记录。"
     else:
         headline = (
-            f"已记录 <b>{recorded}</b> / {TOTAL_DAYS} 天，其中 "
+            f"已记录 <b>{recorded}</b> / {weeks * DAYS_PER_WEEK} 天"
+            f"（还剩 <b>{remaining}</b> 天），其中 "
             f"<b>{esc(top['name'])} {counts[top['id']]} 天</b> 最多。"
         )
 
@@ -459,9 +523,18 @@ def fill_regions(template: str, values: dict[str, str], template_path: Path) -> 
     return out
 
 
-def summarize(days: dict[str, dict], types: list[dict]) -> list[str]:
+def summarize(
+    days: dict[str, dict], types: list[dict], window: tuple[date, date]
+) -> list[str]:
+    first, last = window
+    weeks = (last - first).days // DAYS_PER_WEEK + 1
+    lines = [
+        f"✓ 窗口 {first.isoformat()} → {last.isoformat()}"
+        f"（{weeks} 周 × {DAYS_PER_WEEK} 天 = {weeks * DAYS_PER_WEEK} 格）"
+    ]
     if not days:
-        return ["✓ 0 条记录（events.jsonl 为空）"]
+        lines.append("✓ 0 条记录（events.jsonl 为空）")
+        return lines
     dates = sorted(days)
     counts = Counter(entry["type"] for entry in days.values())
     names = {t["id"]: t["name"] for t in types}
@@ -469,10 +542,9 @@ def summarize(days: dict[str, dict], types: list[dict]) -> list[str]:
         f"{names.get(type_id, type_id)} {count}"
         for type_id, count in counts.most_common()
     )
-    return [
-        f"✓ {len(days)} 条记录，{dates[0]} → {dates[-1]}",
-        f"  {breakdown}",
-    ]
+    lines.append(f"✓ {len(days)} 条记录，{dates[0]} → {dates[-1]}")
+    lines.append(f"  {breakdown}")
+    return lines
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -503,7 +575,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         valid_ids = {t["id"] for t in config["types"]}
-        days, warnings = load_events(args.events, valid_ids, args.allow_duplicate)
+        window = (config["windowStart"], config["windowEnd"])
+        days, warnings = load_events(
+            args.events, valid_ids, args.allow_duplicate, window=window
+        )
     except ValidationError as exc:
         for message in exc.errors:
             print(f"✗ {message}", file=sys.stderr)
@@ -513,21 +588,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"⚠ {message}", file=sys.stderr)
 
     if args.check:
-        for line in summarize(days, config["types"]):
+        for line in summarize(days, config["types"], window):
             print(line)
         return 0
 
     type_by_id = {t["id"]: t for t in config["types"]}
     today = date.today()
-    matrix = window_dates(today, config["weekStart"])
-    headline, stats = render_stats(matrix, days, config["types"])
+    matrix = window_dates(window[0], window[1], config["weekStart"])
+    weeks = len(matrix[0])
+    headline, stats = render_stats(matrix, days, config["types"], today)
     start = matrix[0][0]
-    end = matrix[DAYS_PER_WEEK - 1][WEEKS - 1]
+    end = matrix[DAYS_PER_WEEK - 1][weeks - 1]
 
     values = {
         "heading": esc(config["title"]),
         "subtitle": esc(
-            f"最近 {WEEKS} 周 · {start.isoformat()} → {end.isoformat()} · "
+            f"{start.isoformat()} → {end.isoformat()} · 共 {weeks} 周 · "
             f"周{'一' if config['weekStart'] == 1 else '日'}起始"
         ),
         "headline": headline,
@@ -537,6 +613,7 @@ def main(argv: list[str] | None = None) -> int:
         "cells": render_cells(matrix, days, type_by_id, today, config["showGlyph"]),
         "legend": render_legend(config["types"]),
         "notes": render_notes(days, type_by_id),
+        "vars": render_vars(weeks),
         "footer": esc(
             f"共 {len(days)} 条记录 · 数据生成于 {build_timestamp()} · 源自 events.jsonl"
         ),
@@ -558,7 +635,7 @@ def main(argv: list[str] | None = None) -> int:
     # 保险：确保 Pages 不会尝试用 Jekyll 处理产物
     (args.out.parent / ".nojekyll").write_text("", encoding="utf-8")
 
-    for line in summarize(days, config["types"]):
+    for line in summarize(days, config["types"], window):
         print(line)
     size_kb = args.out.stat().st_size / 1024
     print(f"  → {args.out} ({size_kb:.1f} KB)")

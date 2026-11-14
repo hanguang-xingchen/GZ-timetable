@@ -2,6 +2,8 @@
   "title": "被安排的一年",
   "weekStart": 1,
   "showGlyph": false,
+  "windowStart": "2026-11-02",
+  "windowEnd": "2027-06-08",
   "types": [
     { "id": "school",   "name": "正常上学", "color": "#6e7681", "glyph": "●" },
     { "id": "partial",  "name": "部分占用", "color": "#d29922", "glyph": "▲" },

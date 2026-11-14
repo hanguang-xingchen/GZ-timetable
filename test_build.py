@@ -14,7 +14,9 @@ from pathlib import Path
 import build
 
 TEMPLATE = """<!doctype html>
-<html lang="zh-CN"><head><title>时间墙</title></head>
+<html lang="zh-CN"><head><title>时间墙</title>
+<!--build:vars--><style>:root{--cols:52}</style><!--/build:vars-->
+</head>
 <body data-state="unbuilt">
 <h1><!--build:heading--><!--/build:heading--></h1>
 <p><!--build:subtitle--><!--/build:subtitle--></p>
@@ -29,10 +31,19 @@ TEMPLATE = """<!doctype html>
 </body></html>
 """
 
+TODAY = date.today()
+YESTERDAY = TODAY - timedelta(days=1)
+
+# 窗口跟着 TODAY 走，测试才不会过几个月自己失效
+WINDOW_START = TODAY - timedelta(days=7 * 8)
+WINDOW_END = TODAY + timedelta(days=7 * 3)
+
 CONFIG = {
     "title": "测试墙",
     "weekStart": 1,
     "showGlyph": False,
+    "windowStart": WINDOW_START.isoformat(),
+    "windowEnd": WINDOW_END.isoformat(),
     "types": [
         {"id": "school", "name": "正常上学", "color": "#6e7681"},
         {"id": "vacation", "name": "休假", "color": "#2ea043"},
@@ -41,8 +52,17 @@ CONFIG = {
 
 VALID_IDS = {"school", "vacation"}
 
-TODAY = date.today()
-YESTERDAY = TODAY - timedelta(days=1)
+# 期望值一律用「向外取整到完整周」之后的边界，别在测试里重算一遍取整逻辑
+MATRIX = build.window_dates(WINDOW_START, WINDOW_END, 1)
+WEEKS = len(MATRIX[0])
+CELLS = WEEKS * 7
+BOUNDS = (MATRIX[0][0], MATRIX[6][-1])
+
+# windowStart / windowEnd 是必填项，手搓最小 config 时得带上
+WINDOW_FIELDS = {
+    "windowStart": WINDOW_START.isoformat(),
+    "windowEnd": WINDOW_END.isoformat(),
+}
 
 
 def cell_count(html_text: str) -> int:
@@ -92,9 +112,14 @@ class TestConfig(TempCase):
         self.assertEqual(config["weekStart"], 1)
         self.assertEqual(config["showGlyph"], False)
         self.assertEqual([t["id"] for t in config["types"]], ["school", "vacation"])
+        # 窗口已向外取整到完整周
+        self.assertEqual(config["windowStart"], BOUNDS[0])
+        self.assertEqual(config["windowEnd"], BOUNDS[1])
 
     def test_defaults_applied_when_optional_fields_missing(self) -> None:
-        path = self.write_config({"types": [{"id": "a", "name": "A", "color": "#000000"}]})
+        path = self.write_config(
+            {**WINDOW_FIELDS, "types": [{"id": "a", "name": "A", "color": "#000000"}]}
+        )
         config = build.load_config(path)
         self.assertEqual(config["title"], "时间墙")
         self.assertEqual(config["weekStart"], 1)
@@ -102,9 +127,41 @@ class TestConfig(TempCase):
 
     def test_glyph_kept_only_when_single_char(self) -> None:
         path = self.write_config(
-            {"types": [{"id": "a", "name": "A", "color": "#000000", "glyph": "★"}]}
+            {
+                **WINDOW_FIELDS,
+                "types": [{"id": "a", "name": "A", "color": "#000000", "glyph": "★"}],
+            }
         )
         self.assertEqual(build.load_config(path)["types"][0]["glyph"], "★")
+
+    def test_window_snaps_outward_to_whole_weeks(self) -> None:
+        # 2027-06-09 是周三（高考结束那天），应当扩成 06-07 ~ 06-13 那一整周
+        path = self.write_config(
+            dict(CONFIG, windowStart="2027-06-09", windowEnd="2027-06-09")
+        )
+        config = build.load_config(path)
+        self.assertEqual(config["windowStart"], date(2027, 6, 7))
+        self.assertEqual(config["windowEnd"], date(2027, 6, 13))
+
+    def test_missing_window_rejected(self) -> None:
+        for key in ("windowStart", "windowEnd"):
+            bad = {k: v for k, v in CONFIG.items() if k != key}
+            with self.assertRaises(build.ValidationError, msg=key) as ctx:
+                build.load_config(self.write_config(bad))
+            self.assertErrors(ctx.exception.errors, key, "YYYY-MM-DD")
+
+    def test_malformed_window_rejected(self) -> None:
+        for value in ["2027-6-13", "2027/06/13", "20270613", "2027-02-30", None, 20270613]:
+            bad = dict(CONFIG, windowEnd=value)
+            with self.assertRaises(build.ValidationError, msg=f"windowEnd={value!r}") as ctx:
+                build.load_config(self.write_config(bad))
+            self.assertErrors(ctx.exception.errors, "windowEnd")
+
+    def test_window_end_before_start_rejected(self) -> None:
+        bad = dict(CONFIG, windowStart="2027-06-13", windowEnd="2026-11-02")
+        with self.assertRaises(build.ValidationError) as ctx:
+            build.load_config(self.write_config(bad))
+        self.assertErrors(ctx.exception.errors, "不能早于")
 
     def test_unknown_field_rejected(self) -> None:
         bad = dict(CONFIG, colour="#ffffff")
@@ -268,6 +325,36 @@ class TestEvents(TempCase):
             build.load_events(self.tmp / "nope.jsonl", VALID_IDS, None)
         self.assertErrors(ctx.exception.errors, "文件不存在")
 
+    def test_record_outside_window_rejected(self) -> None:
+        for edge in (BOUNDS[0] - timedelta(days=1), BOUNDS[1] + timedelta(days=1)):
+            path = self.write_events(
+                [json.dumps({"date": edge.isoformat(), "type": "school"})]
+            )
+            with self.assertRaises(
+                build.ValidationError, msg=edge.isoformat()
+            ) as ctx:
+                build.load_events(path, VALID_IDS, None, window=BOUNDS)
+            self.assertErrors(
+                ctx.exception.errors, edge.isoformat(), "不在窗口", "windowStart"
+            )
+
+    def test_record_on_window_edges_accepted(self) -> None:
+        path = self.write_events(
+            [
+                json.dumps({"date": BOUNDS[0].isoformat(), "type": "school"}),
+                json.dumps({"date": BOUNDS[1].isoformat(), "type": "vacation"}),
+            ]
+        )
+        days, warnings = build.load_events(path, VALID_IDS, None, window=BOUNDS)
+        self.assertEqual(len(days), 2)
+        self.assertEqual(warnings, [])
+
+    def test_window_check_skipped_when_window_is_none(self) -> None:
+        far = (BOUNDS[1] + timedelta(days=400)).isoformat()
+        path = self.write_events([json.dumps({"date": far, "type": "school"})])
+        days, _ = build.load_events(path, VALID_IDS, None)
+        self.assertEqual(list(days), [far])
+
 
 class TestRender(TempCase):
     """静态渲染：格子/标签/列表在构建时写死，页面不含脚本。"""
@@ -276,8 +363,10 @@ class TestRender(TempCase):
         config = build.load_config(self.write_config())
         records = days if days is not None else {}
         type_by_id = {t["id"]: t for t in config["types"]}
-        matrix = build.window_dates(TODAY, config["weekStart"])
-        headline, stats = build.render_stats(matrix, records, config["types"])
+        matrix = build.window_dates(
+            config["windowStart"], config["windowEnd"], config["weekStart"]
+        )
+        headline, stats = build.render_stats(matrix, records, config["types"], TODAY)
         values = {
             "heading": build.esc(config["title"]),
             "subtitle": "副标题",
@@ -288,14 +377,19 @@ class TestRender(TempCase):
             "cells": build.render_cells(matrix, records, type_by_id, TODAY, config["showGlyph"]),
             "legend": build.render_legend(config["types"]),
             "notes": build.render_notes(records, type_by_id),
+            "vars": build.render_vars(len(matrix[0])),
             "footer": "页脚",
         }
         return build.fill_regions(TEMPLATE, values, Path("index.html"))
 
-    def test_grid_is_52_by_7_static_cells(self) -> None:
+    def test_grid_covers_whole_window_as_static_cells(self) -> None:
         html_text = self.build_html()
-        self.assertEqual(cell_count(html_text), 364)
+        self.assertEqual(cell_count(html_text), CELLS)
         self.assertEqual(html_text.count('class="row" role="row"'), 7)
+
+    def test_cols_var_matches_window_width(self) -> None:
+        html_text = self.build_html()
+        self.assertIn(f"<style>:root{{--cols:{WEEKS}}}</style>", html_text)
 
     def test_recorded_days_render_with_type_color(self) -> None:
         html_text = self.build_html(
@@ -305,7 +399,7 @@ class TestRender(TempCase):
             }
         )
         self.assertEqual(sorted(filled_cells(html_text)), sorted(["#6e7681", "#2ea043"]))
-        self.assertEqual(html_text.count("cell--empty"), 364 - 2)
+        self.assertEqual(html_text.count("cell--empty"), CELLS - 2)
 
     def test_no_script_tags_in_output(self) -> None:
         html_text = self.build_html({TODAY.isoformat(): {"type": "school"}})
@@ -335,10 +429,9 @@ class TestRender(TempCase):
         self.assertEqual(html_text.count("&lt;/script&gt;"), 3)
 
     def test_future_days_marked(self) -> None:
-        matrix = build.window_dates(TODAY, 1)
-        html_text = self.build_html()
-        if matrix[6][51] > TODAY:
-            self.assertGreaterEqual(html_text.count("cell--future"), 1)
+        # 窗口终点固定在 config 里且晚于 TODAY，所以「还没到」的格子数是可以精确算出来的
+        html_text = self.build_html({TODAY.isoformat(): {"type": "school"}})
+        self.assertEqual(html_text.count("cell--future"), (BOUNDS[1] - TODAY).days)
 
     def test_fill_is_idempotent(self) -> None:
         once = self.build_html()
@@ -346,7 +439,9 @@ class TestRender(TempCase):
         self.assertEqual(once, twice)
         # 对已构建的产物再填一次也不应报错（允许把 --template 指向上次产物）
         config = build.load_config(self.write_config())
-        matrix = build.window_dates(TODAY, config["weekStart"])
+        matrix = build.window_dates(
+            config["windowStart"], config["windowEnd"], config["weekStart"]
+        )
         values = {name: "" for name in build.REGIONS}
         values["cells"] = build.render_cells(
             matrix, {}, {t["id"]: t for t in config["types"]}, TODAY, False
@@ -374,12 +469,34 @@ class TestRender(TempCase):
             "<div>一</div><div></div><div>三</div><div></div><div>五</div><div></div><div></div>",
         )
 
-    def test_window_starts_on_week_start_and_spans_52_weeks(self) -> None:
-        matrix = build.window_dates(TODAY, 1)
-        self.assertEqual(matrix[0][0].weekday(), 0)  # 周一
-        self.assertEqual(matrix[6][51] - matrix[0][0], timedelta(days=363))
-        self.assertGreaterEqual(matrix[6][51], TODAY)
-        self.assertLess(matrix[0][0], TODAY - timedelta(days=350))
+    def test_window_matrix_is_whole_weeks_monday_first(self) -> None:
+        matrix = build.window_dates(WINDOW_START, WINDOW_END, 1)
+        self.assertEqual(len(matrix), 7)
+        self.assertEqual(matrix[0][0].weekday(), 0)  # 首格周一
+        self.assertEqual(matrix[6][-1].weekday(), 6)  # 末格周日
+        self.assertLessEqual(matrix[0][0], WINDOW_START)
+        self.assertGreaterEqual(matrix[6][-1], WINDOW_END)
+        self.assertEqual(len(matrix[0]), WEEKS)
+
+    def test_gaokao_window_is_exactly_32_weeks(self) -> None:
+        # 2026-11-02（周一）→ 2027-06-13（周日）：两端都不用取整，正好 32 周 224 天
+        matrix = build.window_dates(date(2026, 11, 2), date(2027, 6, 13), 1)
+        self.assertEqual(matrix[0][0], date(2026, 11, 2))
+        self.assertEqual(matrix[6][-1], date(2027, 6, 13))
+        self.assertEqual(len(matrix[0]), 32)
+
+    def test_midweek_anchor_expands_to_containing_week(self) -> None:
+        # 和仓库真实 config 一致：填高考结束的 2027-06-08（周二），扩成 06-07 ~ 06-13 整周
+        matrix = build.window_dates(date(2027, 6, 8), date(2027, 6, 8), 1)
+        self.assertEqual(matrix[0][0], date(2027, 6, 7))
+        self.assertEqual(matrix[6][-1], date(2027, 6, 13))
+        self.assertEqual(len(matrix[0]), 1)
+
+    def test_sunday_start_window_ends_on_saturday(self) -> None:
+        matrix = build.window_dates(date(2027, 6, 9), date(2027, 6, 9), 0)
+        self.assertEqual(matrix[0][0], date(2027, 6, 6))  # 周日
+        self.assertEqual(matrix[6][-1], date(2027, 6, 12))  # 周六
+        self.assertEqual(len(matrix[0]), 1)
 
 
 class TestMain(TempCase):
@@ -410,20 +527,45 @@ class TestMain(TempCase):
         self.assertTrue(out.exists())
         self.assertTrue((out.parent / ".nojekyll").exists())
         html_text = out.read_text(encoding="utf-8")
-        self.assertEqual(cell_count(html_text), 364)
+        self.assertEqual(cell_count(html_text), CELLS)
+        self.assertIn(f"<style>:root{{--cols:{WEEKS}}}</style>", html_text)
         self.assertIn('data-state="built"', html_text)
         self.assertNotIn("<script", html_text)
         self.assertEqual(sorted(filled_cells(html_text)), sorted(["#6e7681", "#2ea043"]))
         self.assertIn("休息", html_text)
+
+    def test_subtitle_spells_out_the_fixed_window(self) -> None:
+        _, out = self.run_build()
+        html_text = out.read_text(encoding="utf-8")
+        self.assertIn(f"{BOUNDS[0]} → {BOUNDS[1]} · 共 {WEEKS} 周", html_text)
+        self.assertNotIn("最近 52 周", html_text)
 
     def test_check_does_not_write(self) -> None:
         code, out = self.run_build("--check")
         self.assertEqual(code, 0)
         self.assertFalse(out.exists())
 
+    def test_out_of_window_record_fails_build(self) -> None:
+        self.write_config()
+        self.write_events(
+            [json.dumps({"date": (BOUNDS[1] + timedelta(days=1)).isoformat(), "type": "school"})]
+        )
+        self.write("index.html", TEMPLATE)
+        out = self.tmp / "dist" / "index.html"
+        code = build.main(
+            [
+                "--config", str(self.tmp / "config.json"),
+                "--events", str(self.tmp / "events.jsonl"),
+                "--template", str(self.tmp / "index.html"),
+                "--out", str(out),
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertFalse(out.exists())
+
     def test_invalid_data_returns_nonzero_and_writes_nothing(self) -> None:
         self.write_config()
-        self.write_events(['{"date": "2026-11-13", "type": "nope"}'])
+        self.write_events([json.dumps({"date": TODAY.isoformat(), "type": "nope"})])
         self.write("index.html", TEMPLATE)
         out = self.tmp / "dist" / "index.html"
         code = build.main(
@@ -477,14 +619,20 @@ class TestProjectFiles(TempCase):
         )
         self.assertEqual(code, 0)
         html_text = out.read_text(encoding="utf-8")
-        self.assertEqual(cell_count(html_text), 364)
+        # 期望格数从仓库自己的 config 算出来，改窗口日期不用回来改测试
+        config = build.load_config(build.ROOT / "config.json")
+        matrix = build.window_dates(
+            config["windowStart"], config["windowEnd"], config["weekStart"]
+        )
+        weeks = len(matrix[0])
+        self.assertEqual(cell_count(html_text), weeks * 7)
+        self.assertIn(f"<style>:root{{--cols:{weeks}}}</style>", html_text)
         self.assertIn('data-state="built"', html_text)
         self.assertNotIn("<script", html_text)
         # 构建只写 --out，仓库里的模板必须保持未构建状态
-        self.assertIn(
-            'data-state="unbuilt"',
-            (build.ROOT / "index.html").read_text(encoding="utf-8"),
-        )
+        template_text = (build.ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn('data-state="unbuilt"', template_text)
+        self.assertIn("<!--build:vars-->", template_text)
 
 
 if __name__ == "__main__":

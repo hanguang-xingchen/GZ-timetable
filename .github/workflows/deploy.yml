@@ -9,9 +9,10 @@ on:
       - index.html
       - build.py
       - .github/workflows/deploy.yml
-  # 52 周窗口在构建时算死，只在跨周时变化；每周一定时重建，兜底长期不 push 的情况
+  # 窗口本身固定了，但「还没到的格子」变暗是按构建当天算的，不重建就会滞后；
+  # 每天定时重建一次，让它自己跟上日期
   schedule:
-    - cron: "17 3 * * 1"
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 # deploy-pages 需要 pages:write 换发部署凭证；id-token:write 用于 OIDC 认证
