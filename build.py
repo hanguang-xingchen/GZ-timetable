@@ -24,7 +24,10 @@ ROOT = Path(__file__).resolve().parent
 
 DAYS_PER_WEEK = 7
 
-CONFIG_KEYS = {"title", "weekStart", "showGlyph", "types", "windowStart", "windowEnd"}
+CONFIG_KEYS = {
+    "title", "weekStart", "showGlyph", "types",
+    "windowStart", "windowEnd", "countdownLabel",
+}
 TYPE_KEYS = {"id", "name", "color", "glyph"}
 RECORD_KEYS = {"date", "type", "note"}
 
@@ -117,8 +120,8 @@ def load_config(path: Path) -> dict:
     if not isinstance(show_glyph, bool):
         errors.append(f"{path}: showGlyph 必须是布尔值，当前为 {show_glyph!r}")
 
-    # 窗口两端各向外取整到完整周，所以填周内任意一天都行
-    # （比如直接填高考结束的 2027-06-09，会自动扩成 06-07 ~ 06-13 那一周）
+    # 起点向外取整到所在周的第一天（墙的左边缘总是完整周）；
+    # 终点是硬边界：最后一列只画到这一天为止，考完那几天不该被墙吞掉也不该多画
     window_start = parse_iso_date(raw.get("windowStart"))
     window_end = parse_iso_date(raw.get("windowEnd"))
     for key, value, parsed in (
@@ -129,16 +132,22 @@ def load_config(path: Path) -> dict:
             errors.append(
                 f"{path}: {key} 必须是 YYYY-MM-DD 形式的真实日期，当前为 {value!r}"
             )
-    if window_start is not None and window_end is not None:
-        if not isinstance(week_start, bool) and week_start in (0, 1):
-            window_start -= timedelta(days=week_offset(window_start, week_start))
-            window_end += timedelta(
-                days=DAYS_PER_WEEK - 1 - week_offset(window_end, week_start)
-            )
-        if window_end < window_start:
-            errors.append(
-                f"{path}: windowEnd（{window_end}）不能早于 windowStart（{window_start}）"
-            )
+    if window_start is not None and not isinstance(week_start, bool) and week_start in (0, 1):
+        window_start -= timedelta(days=week_offset(window_start, week_start))
+    if window_start is not None and window_end is not None and window_end < window_start:
+        errors.append(
+            f"{path}: windowEnd（{window_end}）不能早于 windowStart（{window_start}）"
+        )
+
+    countdown_label = raw.get("countdownLabel")
+    if countdown_label is not None and (
+        not isinstance(countdown_label, str) or not countdown_label.strip()
+    ):
+        errors.append(
+            f"{path}: countdownLabel 必须是非空字符串（不需要倒计时请省略该字段），"
+            f"当前为 {countdown_label!r}"
+        )
+        countdown_label = None
 
     raw_types = raw.get("types")
     if not isinstance(raw_types, list) or not raw_types:
@@ -197,6 +206,7 @@ def load_config(path: Path) -> dict:
         "showGlyph": show_glyph,
         "windowStart": window_start,
         "windowEnd": window_end,
+        "countdownLabel": countdown_label,
         "types": types,
     }
 
@@ -318,19 +328,29 @@ def build_timestamp() -> str:
 # ---------------------------------------------------------------- 渲染
 
 
-def window_dates(start: date, end: date, week_start: int) -> list[list[date]]:
+def window_dates(start: date, end: date, week_start: int) -> list[list[date | None]]:
     """返回 7 行 × N 列的日期矩阵（按行输出 DOM），N 由起止日期决定。
 
-    两端各向外取整到完整周，所以传周内任意一天都可以；load_config 已经取整过，
-    这里再算一次是幂等的。
+    起点向外取整到所在周的第一天，终点是硬边界：最后一列里晚于 end 的位置填 None，
+    渲染时直接跳过，所以墙会精确停在那一天（最后一列可能不满 7 格）。
     """
     first = start - timedelta(days=week_offset(start, week_start))
     last_week = end - timedelta(days=week_offset(end, week_start))
     weeks = (last_week - first).days // DAYS_PER_WEEK + 1
     return [
-        [first + timedelta(days=col * DAYS_PER_WEEK + row) for col in range(weeks)]
+        [
+            d if d <= end else None
+            for d in (
+                first + timedelta(days=col * DAYS_PER_WEEK + row) for col in range(weeks)
+            )
+        ]
         for row in range(DAYS_PER_WEEK)
     ]
+
+
+def drawn_days(matrix: list[list[date | None]]) -> list[date]:
+    """矩阵里真正会画出来的日期，按行优先顺序。"""
+    return [d for row in matrix for d in row if d is not None]
 
 
 def date_label(d: date) -> str:
@@ -359,7 +379,7 @@ def tip_html(d: date, type_def: dict, record: dict) -> str:
 
 
 def render_cells(
-    matrix: list[list[date]],
+    matrix: list[list[date | None]],
     days: dict[str, dict],
     type_by_id: dict[str, dict],
     today: date,
@@ -369,6 +389,8 @@ def render_cells(
     for row_dates in matrix:
         cells = []
         for d in row_dates:
+            if d is None:
+                continue  # 窗口终点之后的位置，不画格子
             record = days.get(d.isoformat())
             type_def = type_by_id.get(record["type"]) if record else None
             classes = ["cell"]
@@ -393,13 +415,13 @@ def render_cells(
     return "".join(rows)
 
 
-def render_months(matrix: list[list[date]]) -> str:
+def render_months(matrix: list[list[date | None]]) -> str:
     labels = []
     last_col = -99
     for col in range(len(matrix[0])):
         for row in range(DAYS_PER_WEEK):
             d = matrix[row][col]
-            if d.day == 1:
+            if d is not None and d.day == 1:
                 if col - last_col >= 3:
                     labels.append(f'<span style="grid-column:{col + 1}">{d.month}月</span>')
                     last_col = col
@@ -435,19 +457,23 @@ def render_vars(weeks: int) -> str:
 
 
 def render_stats(
-    matrix: list[list[date]], days: dict[str, dict], types: list[dict], today: date
+    matrix: list[list[date | None]],
+    days: dict[str, dict],
+    types: list[dict],
+    today: date,
+    countdown_label: str | None,
 ) -> tuple[str, str]:
+    drawn = drawn_days(matrix)
     counts = {t["id"]: 0 for t in types}
     recorded = 0
     remaining = 0
-    for row in matrix:
-        for d in row:
-            if d > today:
-                remaining += 1
-            record = days.get(d.isoformat())
-            if record and record["type"] in counts:
-                counts[record["type"]] += 1
-                recorded += 1
+    for d in drawn:
+        if d > today:
+            remaining += 1
+        record = days.get(d.isoformat())
+        if record and record["type"] in counts:
+            counts[record["type"]] += 1
+            recorded += 1
     weeks = len(matrix[0])
     ranked = sorted(types, key=lambda t: counts[t["id"]], reverse=True)
     top = ranked[0] if ranked else None
@@ -457,10 +483,11 @@ def render_stats(
         headline = f"这 {weeks} 周还没有任何记录。"
     else:
         headline = (
-            f"已记录 <b>{recorded}</b> / {weeks * DAYS_PER_WEEK} 天"
-            f"（还剩 <b>{remaining}</b> 天），其中 "
+            f"已记录 <b>{recorded}</b> / {len(drawn)} 天，其中 "
             f"<b>{esc(top['name'])} {counts[top['id']]} 天</b> 最多。"
         )
+    if countdown_label and remaining > 0:
+        headline += f"距离{esc(countdown_label)}还有 <b>{remaining}</b> 天。"
 
     bars = []
     for t in ranked:
@@ -524,13 +551,13 @@ def fill_regions(template: str, values: dict[str, str], template_path: Path) -> 
 
 
 def summarize(
-    days: dict[str, dict], types: list[dict], window: tuple[date, date]
+    days: dict[str, dict], types: list[dict], matrix: list[list[date | None]]
 ) -> list[str]:
-    first, last = window
-    weeks = (last - first).days // DAYS_PER_WEEK + 1
+    drawn = drawn_days(matrix)
+    # 行优先顺序下 drawn[-1] 不是最晚一天（末列不满 7 格时后面几行仍会补进更早的列）
     lines = [
-        f"✓ 窗口 {first.isoformat()} → {last.isoformat()}"
-        f"（{weeks} 周 × {DAYS_PER_WEEK} 天 = {weeks * DAYS_PER_WEEK} 格）"
+        f"✓ 窗口 {drawn[0].isoformat()} → {max(drawn).isoformat()}"
+        f"（{len(matrix[0])} 周，{len(drawn)} 格）"
     ]
     if not days:
         lines.append("✓ 0 条记录（events.jsonl 为空）")
@@ -575,7 +602,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         valid_ids = {t["id"] for t in config["types"]}
-        window = (config["windowStart"], config["windowEnd"])
+        matrix = window_dates(
+            config["windowStart"], config["windowEnd"], config["weekStart"]
+        )
+        # 记录校验的边界与「画出来的范围」严格一致：左到取整后的周首，右到 windowEnd 当天
+        window = (matrix[0][0], config["windowEnd"])
         days, warnings = load_events(
             args.events, valid_ids, args.allow_duplicate, window=window
         )
@@ -588,17 +619,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"⚠ {message}", file=sys.stderr)
 
     if args.check:
-        for line in summarize(days, config["types"], window):
+        for line in summarize(days, config["types"], matrix):
             print(line)
         return 0
 
     type_by_id = {t["id"]: t for t in config["types"]}
     today = date.today()
-    matrix = window_dates(window[0], window[1], config["weekStart"])
     weeks = len(matrix[0])
-    headline, stats = render_stats(matrix, days, config["types"], today)
+    headline, stats = render_stats(
+        matrix, days, config["types"], today, config["countdownLabel"]
+    )
     start = matrix[0][0]
-    end = matrix[DAYS_PER_WEEK - 1][weeks - 1]
+    end = config["windowEnd"]
 
     values = {
         "heading": esc(config["title"]),
@@ -635,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
     # 保险：确保 Pages 不会尝试用 Jekyll 处理产物
     (args.out.parent / ".nojekyll").write_text("", encoding="utf-8")
 
-    for line in summarize(days, config["types"], window):
+    for line in summarize(days, config["types"], matrix):
         print(line)
     size_kb = args.out.stat().st_size / 1024
     print(f"  → {args.out} ({size_kb:.1f} KB)")

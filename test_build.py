@@ -44,6 +44,7 @@ CONFIG = {
     "showGlyph": False,
     "windowStart": WINDOW_START.isoformat(),
     "windowEnd": WINDOW_END.isoformat(),
+    "countdownLabel": "高考结束",
     "types": [
         {"id": "school", "name": "正常上学", "color": "#6e7681"},
         {"id": "vacation", "name": "休假", "color": "#2ea043"},
@@ -52,11 +53,11 @@ CONFIG = {
 
 VALID_IDS = {"school", "vacation"}
 
-# 期望值一律用「向外取整到完整周」之后的边界，别在测试里重算一遍取整逻辑
+# 期望值一律从矩阵推：起点取整到周首，终点是硬边界（最后一列可能不满 7 格）
 MATRIX = build.window_dates(WINDOW_START, WINDOW_END, 1)
 WEEKS = len(MATRIX[0])
-CELLS = WEEKS * 7
-BOUNDS = (MATRIX[0][0], MATRIX[6][-1])
+CELLS = len(build.drawn_days(MATRIX))
+BOUNDS = (MATRIX[0][0], WINDOW_END)
 
 # windowStart / windowEnd 是必填项，手搓最小 config 时得带上
 WINDOW_FIELDS = {
@@ -112,9 +113,10 @@ class TestConfig(TempCase):
         self.assertEqual(config["weekStart"], 1)
         self.assertEqual(config["showGlyph"], False)
         self.assertEqual([t["id"] for t in config["types"]], ["school", "vacation"])
-        # 窗口已向外取整到完整周
+        # 起点取整到周首；终点是硬边界，原样保留
         self.assertEqual(config["windowStart"], BOUNDS[0])
-        self.assertEqual(config["windowEnd"], BOUNDS[1])
+        self.assertEqual(config["windowEnd"], WINDOW_END)
+        self.assertEqual(config["countdownLabel"], "高考结束")
 
     def test_defaults_applied_when_optional_fields_missing(self) -> None:
         path = self.write_config(
@@ -124,6 +126,7 @@ class TestConfig(TempCase):
         self.assertEqual(config["title"], "时间墙")
         self.assertEqual(config["weekStart"], 1)
         self.assertEqual(config["showGlyph"], False)
+        self.assertIsNone(config["countdownLabel"])
 
     def test_glyph_kept_only_when_single_char(self) -> None:
         path = self.write_config(
@@ -134,14 +137,22 @@ class TestConfig(TempCase):
         )
         self.assertEqual(build.load_config(path)["types"][0]["glyph"], "★")
 
-    def test_window_snaps_outward_to_whole_weeks(self) -> None:
-        # 2027-06-09 是周三（高考结束那天），应当扩成 06-07 ~ 06-13 那一整周
+    def test_start_snaps_to_week_start_but_end_stays_hard(self) -> None:
+        # 起点 2027-06-09（周三）取整到周一；终点不扩周，原样停在那天
         path = self.write_config(
             dict(CONFIG, windowStart="2027-06-09", windowEnd="2027-06-09")
         )
         config = build.load_config(path)
         self.assertEqual(config["windowStart"], date(2027, 6, 7))
-        self.assertEqual(config["windowEnd"], date(2027, 6, 13))
+        self.assertEqual(config["windowEnd"], date(2027, 6, 9))
+
+    def test_countdown_label_optional_and_must_be_nonempty_string(self) -> None:
+        without = {k: v for k, v in CONFIG.items() if k != "countdownLabel"}
+        self.assertIsNone(build.load_config(self.write_config(without))["countdownLabel"])
+        for bad in ["", "   ", 5, True]:
+            with self.assertRaises(build.ValidationError, msg=f"label={bad!r}") as ctx:
+                build.load_config(self.write_config(dict(CONFIG, countdownLabel=bad)))
+            self.assertErrors(ctx.exception.errors, "countdownLabel")
 
     def test_missing_window_rejected(self) -> None:
         for key in ("windowStart", "windowEnd"):
@@ -366,7 +377,9 @@ class TestRender(TempCase):
         matrix = build.window_dates(
             config["windowStart"], config["windowEnd"], config["weekStart"]
         )
-        headline, stats = build.render_stats(matrix, records, config["types"], TODAY)
+        headline, stats = build.render_stats(
+            matrix, records, config["types"], TODAY, config["countdownLabel"]
+        )
         values = {
             "heading": build.esc(config["title"]),
             "subtitle": "副标题",
@@ -469,34 +482,36 @@ class TestRender(TempCase):
             "<div>一</div><div></div><div>三</div><div></div><div>五</div><div></div><div></div>",
         )
 
-    def test_window_matrix_is_whole_weeks_monday_first(self) -> None:
+    def test_window_matrix_starts_on_week_start_and_ends_on_hard_end(self) -> None:
         matrix = build.window_dates(WINDOW_START, WINDOW_END, 1)
         self.assertEqual(len(matrix), 7)
         self.assertEqual(matrix[0][0].weekday(), 0)  # 首格周一
-        self.assertEqual(matrix[6][-1].weekday(), 6)  # 末格周日
         self.assertLessEqual(matrix[0][0], WINDOW_START)
-        self.assertGreaterEqual(matrix[6][-1], WINDOW_END)
+        self.assertEqual(max(build.drawn_days(matrix)), WINDOW_END)  # 最晚一格就是终点当天
         self.assertEqual(len(matrix[0]), WEEKS)
 
-    def test_gaokao_window_is_exactly_32_weeks(self) -> None:
-        # 2026-11-02（周一）→ 2027-06-13（周日）：两端都不用取整，正好 32 周 224 天
-        matrix = build.window_dates(date(2026, 11, 2), date(2027, 6, 13), 1)
+    def test_wall_stops_exactly_on_gaokao_end_day(self) -> None:
+        # 2026-11-02（周一）→ 2027-06-08（周二）：32 列，最后一列只画周一周二两格
+        matrix = build.window_dates(date(2026, 11, 2), date(2027, 6, 8), 1)
         self.assertEqual(matrix[0][0], date(2026, 11, 2))
-        self.assertEqual(matrix[6][-1], date(2027, 6, 13))
         self.assertEqual(len(matrix[0]), 32)
+        self.assertEqual(matrix[0][-1], date(2027, 6, 7))
+        self.assertEqual(matrix[1][-1], date(2027, 6, 8))
+        self.assertIsNone(matrix[2][-1])  # 周三及之后不画格子
+        self.assertEqual(len(build.drawn_days(matrix)), 219)
 
-    def test_midweek_anchor_expands_to_containing_week(self) -> None:
-        # 和仓库真实 config 一致：填高考结束的 2027-06-08（周二），扩成 06-07 ~ 06-13 整周
+    def test_end_anchor_is_not_expanded_to_whole_week(self) -> None:
         matrix = build.window_dates(date(2027, 6, 8), date(2027, 6, 8), 1)
         self.assertEqual(matrix[0][0], date(2027, 6, 7))
-        self.assertEqual(matrix[6][-1], date(2027, 6, 13))
-        self.assertEqual(len(matrix[0]), 1)
+        self.assertEqual(
+            build.drawn_days(matrix), [date(2027, 6, 7), date(2027, 6, 8)]
+        )
 
-    def test_sunday_start_window_ends_on_saturday(self) -> None:
+    def test_sunday_start_week_rows_run_sun_to_sat(self) -> None:
         matrix = build.window_dates(date(2027, 6, 9), date(2027, 6, 9), 0)
         self.assertEqual(matrix[0][0], date(2027, 6, 6))  # 周日
-        self.assertEqual(matrix[6][-1], date(2027, 6, 12))  # 周六
-        self.assertEqual(len(matrix[0]), 1)
+        self.assertEqual(build.drawn_days(matrix)[-1], date(2027, 6, 9))
+        self.assertIsNone(matrix[4][0])  # 周四及之后不画
 
 
 class TestMain(TempCase):
@@ -539,6 +554,31 @@ class TestMain(TempCase):
         html_text = out.read_text(encoding="utf-8")
         self.assertIn(f"{BOUNDS[0]} → {BOUNDS[1]} · 共 {WEEKS} 周", html_text)
         self.assertNotIn("最近 52 周", html_text)
+
+    def test_headline_carries_the_countdown(self) -> None:
+        _, out = self.run_build()
+        html_text = out.read_text(encoding="utf-8")
+        self.assertIn(
+            f"距离高考结束还有 <b>{(WINDOW_END - TODAY).days}</b> 天", html_text
+        )
+
+    def test_headline_drops_countdown_when_label_missing(self) -> None:
+        config = {k: v for k, v in CONFIG.items() if k != "countdownLabel"}
+        events = self.write_events(
+            [json.dumps({"date": TODAY.isoformat(), "type": "school"})]
+        )
+        template = self.write("index.html", TEMPLATE)
+        out = self.tmp / "dist" / "index.html"
+        code = build.main(
+            [
+                "--config", str(self.write_config(config)),
+                "--events", str(events),
+                "--template", str(template),
+                "--out", str(out),
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("距离", out.read_text(encoding="utf-8"))
 
     def test_check_does_not_write(self) -> None:
         code, out = self.run_build("--check")
@@ -625,8 +665,9 @@ class TestProjectFiles(TempCase):
             config["windowStart"], config["windowEnd"], config["weekStart"]
         )
         weeks = len(matrix[0])
-        self.assertEqual(cell_count(html_text), weeks * 7)
+        self.assertEqual(cell_count(html_text), len(build.drawn_days(matrix)))
         self.assertIn(f"<style>:root{{--cols:{weeks}}}</style>", html_text)
+        self.assertIn(f"距离{config['countdownLabel']}还有", html_text)
         self.assertIn('data-state="built"', html_text)
         self.assertNotIn("<script", html_text)
         # 构建只写 --out，仓库里的模板必须保持未构建状态
