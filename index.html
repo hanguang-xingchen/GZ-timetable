@@ -6,7 +6,7 @@
 <title>时间墙</title>
 <style>
 :root {
-  --cell: 18px;
+  --cell: 24px;
   --gap: 3px;
   --cols: 52;
   --bg: #ffffff;
@@ -175,7 +175,7 @@ body[data-state="built"] #empty { display: none; }
   color: var(--muted);
 }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
-/* 图例色块不跟 --cell 走：格子放大到 18px 后，跟着放大会压过旁边 12px 的文字 */
+/* 图例色块不跟 --cell 走：格子是 24px 的大块，色块跟着放大会压过旁边 12px 的文字 */
 .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
 .swatch--empty { background: transparent; box-shadow: inset 0 0 0 1px var(--empty-border); }
 .hint { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
